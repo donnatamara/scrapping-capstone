@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "axios": "^1.14.0",
+    "cheerio": "^1.2.0",
+    "csv-writer": "^1.6.0",
+    "p-limit": "^7.3.0",
+    "pupeteer": "^0.0.1",
+    "puppeteer": "^24.40.0"
+  }
+}

@@ -1,12 +1,14 @@
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
+
 const axios = require('axios');
 const fs = require('fs');
 const cheerio = require('cheerio');
 const http = require('http');
 const https = require('https');
 
-// 🔥 DAFTAR 6 PROVINSI DI JAWA
 const PROVINCES = [
   'Banten', 
   'DKI Jakarta', 
@@ -16,24 +18,53 @@ const PROVINCES = [
   'Jawa Timur'
 ];
 
-// 🚀 NAIK GIGI: 3 Worker dan Concurrency 5
-const NUM_THREADS = 3; 
+const NUM_THREADS = 6; 
 const LENGTH = 100;
 const CONCURRENCY_LIMIT = 5; 
 const PROGRESS_FILE = 'progress_jawa.json';
 
-// ==========================================
-// 👑 THREAD UTAMA (MASTER)
-// ==========================================
 if (isMainThread) {
   (async () => {
-    console.log('🔐 [Master] Mengambil session dari Puppeteer...');
-    const browser = await puppeteer.launch({ headless: true });
+    console.log('🔐 [Master] Mengambil session dari Puppeteer (Stealth Mode)...');
+    
+    const browser = await puppeteer.launch({ 
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled'
+      ]
+    });
+    
     const page = await browser.newPage();
-    await page.goto('https://sirup.inaproc.id/sirup/caripaketctr/index');
+    await page.setViewport({ width: 1366, height: 768 });
+
+    let gotoRetries = 3;
+    while (gotoRetries > 0) {
+      try {
+        await page.goto('https://sirup.inaproc.id/sirup/caripaketctr/index', {
+          waitUntil: 'networkidle2',
+          timeout: 60000
+        });
+        break; 
+      } catch (err) {
+        gotoRetries--;
+        console.log(`⚠️ [Master] Jaringan tidak stabil (${err.message}). Mencoba ulang... (Sisa: ${gotoRetries})`);
+        if (gotoRetries === 0) {
+          await browser.close();
+          throw new Error("Gagal membuka halaman utama setelah 3 percobaan. Cek koneksi internetmu.");
+        }
+        await new Promise(r => setTimeout(r, 5000)); 
+      }
+    }
+
+    await new Promise(r => setTimeout(r, 3000));
 
     const cookies = await page.cookies();
     const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+    
+    const userAgent = await page.evaluate(() => navigator.userAgent);
+    
     await browser.close();
     console.log('✅ [Master] Session didapatkan. Memulai Worker...\n');
 
@@ -46,7 +77,6 @@ if (isMainThread) {
       fs.writeFileSync(PROGRESS_FILE, JSON.stringify(progress, null, 2));
     }
 
-    // Bagi tugas provinsi secara merata ke 3 Worker
     const chunkSize = Math.ceil(PROVINCES.length / NUM_THREADS);
     const workerTasks = [];
     for (let i = 0; i < PROVINCES.length; i += chunkSize) {
@@ -57,10 +87,10 @@ if (isMainThread) {
       const workerId = i + 1;
       const assignedProvinces = workerTasks[i];
 
-      if (!assignedProvinces) continue; // Jaga-jaga jika pembagian ganjil
+      if (!assignedProvinces || assignedProvinces.length === 0) continue;
 
       const worker = new Worker(__filename, {
-        workerData: { workerId, assignedProvinces, cookieString, progressFile: PROGRESS_FILE }
+        workerData: { workerId, assignedProvinces, cookieString, userAgent, progressFile: PROGRESS_FILE }
       });
 
       worker.on('message', (msg) => {
@@ -75,24 +105,27 @@ if (isMainThread) {
       worker.on('error', (err) => console.error(`❌ [Worker ${workerId}] Fatal Error:`, err));
       worker.on('exit', (code) => {
         if (code !== 0) console.error(`⚠️ [Worker ${workerId}] Berhenti dengan kode ${code}`);
-        else console.log(`🎉 [Worker ${workerId}] SEMUA PROVINSI SELESAI!`);
+        else console.log(`🎉 [Worker ${workerId}] PROVINSI SELESAI!`);
       });
     }
   })();
 } 
-// ==========================================
-// 👷‍♂️ THREAD PEKERJA (WORKER SCRAPER)
-// ==========================================
+
 else {
-  const { workerId, assignedProvinces, cookieString, progressFile } = workerData;
+  const { workerId, assignedProvinces, cookieString, userAgent, progressFile } = workerData;
   const OUTPUT = `sirup_2026_jawa_worker${workerId}.csv`;
 
-  const httpAgent = new http.Agent({ keepAlive: true });
-  const httpsAgent = new https.Agent({ keepAlive: true });
+  const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 100 });
+  const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 100 });
   const axiosInstance = axios.create({ httpAgent, httpsAgent, timeout: 30000 });
 
   function sleep(ms) {
     return new Promise(r => setTimeout(r, ms));
+  }
+
+  function randomSleep(min, max) {
+    const delay = Math.floor(Math.random() * (max - min + 1)) + min;
+    return new Promise(r => setTimeout(r, delay));
   }
 
   function csvEscape(value) {
@@ -106,15 +139,15 @@ else {
     return val || '';
   }
 
-  async function getDetail(id) {
+  async function getDetail(id, retries = 3) {
     try {
       const url = `https://sirup.inaproc.id/sirup/rup/detailPaketPenyedia2020?idPaket=${id}`;
       const res = await axiosInstance.get(url, {
         headers: {
-          "User-Agent": "Mozilla/5.0",
+          "User-Agent": userAgent, 
           "Accept": "text/html,application/xhtml+xml",
           "X-Requested-With": "XMLHttpRequest",
-          "Cookie": cookieString
+          "Cookie": cookieString 
         }
       });
 
@@ -132,8 +165,16 @@ else {
         pemilihan: getRange("Jadwal Pemilihan Penyedia")
       };
     } catch (err) {
-      const reason = err.response ? `Status ${err.response.status}` : err.message;
-      parentPort.postMessage({ type: 'log', text: `⚠️ [Worker ${workerId}] Gagal detail ID ${id}: ${reason}` });
+      if (retries > 0) {
+        const errorType = err.response ? `Status ${err.response.status}` : err.code || err.message;
+        parentPort.postMessage({ type: 'log', text: `⏳ [Worker ${workerId}] Gagal ID ${id} (${errorType}). Mencoba ulang... (Sisa retry: ${retries - 1})` });
+        
+        await sleep(5000);
+        return getDetail(id, retries - 1); 
+      }
+
+=      const reason = err.response ? `Status ${err.response.status}` : err.code || err.message;
+      parentPort.postMessage({ type: 'log', text: `❌ [Worker ${workerId}] MENYERAH pada ID ${id} setelah retries habis: ${reason}` });
       return { spesifikasi: "", pemanfaatan: "", kontrak: "", pemilihan: "" };
     }
   }
@@ -156,9 +197,10 @@ else {
         try {
           const res = await axiosInstance.get('https://sirup.inaproc.id/sirup/caripaketctr/search', {
             headers: {
-              Cookie: cookieString,
-              'User-Agent': 'Mozilla/5.0',
-              'X-Requested-With': 'XMLHttpRequest'
+              "Cookie": cookieString,
+              "User-Agent": userAgent, 
+              "Accept": "application/json, text/javascript, */*; q=0.01",
+              "X-Requested-With": "XMLHttpRequest"
             },
             params: {
               tahunAnggaran: 2026, draw: 1, start: currentStart, length: LENGTH,
@@ -202,8 +244,7 @@ else {
             });
             writeStream.write(lines);
             
-            // 🚀 NAIK GIGI: Jeda antar batch hanya 500ms (0.5 detik)
-            await sleep(500); 
+            await randomSleep(500, 1500);
           }
 
           currentStart += LENGTH;
@@ -211,8 +252,7 @@ else {
           parentPort.postMessage({ type: 'progress', province: province, currentStart: currentStart });
           parentPort.postMessage({ type: 'log', text: `✅ [Worker ${workerId}] [${province}] Progress: offset ${currentStart}` });
           
-          // 🚀 NAIK GIGI: Jeda antar halaman hanya 1 detik
-          await sleep(1000); 
+          await randomSleep(2000, 4000); 
 
         } catch (err) {
           const errorMessage = err.response ? `Status ${err.response.status}` : err.message;

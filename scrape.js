@@ -173,7 +173,7 @@ else {
         return getDetail(id, retries - 1); 
       }
 
-=      const reason = err.response ? `Status ${err.response.status}` : err.code || err.message;
+      const reason = err.response ? `Status ${err.response.status}` : err.code || err.message;
       parentPort.postMessage({ type: 'log', text: `❌ [Worker ${workerId}] MENYERAH pada ID ${id} setelah retries habis: ${reason}` });
       return { spesifikasi: "", pemanfaatan: "", kontrak: "", pemilihan: "" };
     }
